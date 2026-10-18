@@ -1,3 +1,4 @@
+use ito_rs::Result;
 use ito_rs::export_anime_plugin;
 use ito_rs::provider::AnimeProvider;
 use ito_rs::models::{Listing, FilterItem, HomeLayout};
@@ -6,24 +7,24 @@ use ito_rs::models::anime::{Anime, Episode, Video, PageResult};
 struct MyAnimePlugin;
 
 impl AnimeProvider for MyAnimePlugin {
-    fn get_home() -> HomeLayout {
-        HomeLayout { components: vec![] }
+    fn get_home() -> Result<HomeLayout> {
+        Ok(HomeLayout { components: vec![] })
     }
 
-    fn get_anime_list(listing: Listing, page: i32) -> PageResult {
-        PageResult { entries: vec![], has_next_page: false }
+    fn get_anime_list(_listing: Listing, _page: i32) -> Result<PageResult> {
+        Ok(PageResult { entries: vec![], has_next_page: false })
     }
 
-    fn get_search_anime_list(query: String, page: i32, filters: Vec<FilterItem>) -> PageResult {
-        PageResult { entries: vec![], has_next_page: false }
+    fn get_search_anime_list(_query: &str, _page: i32, _filters: Vec<FilterItem>) -> Result<PageResult> {
+        Ok(PageResult { entries: vec![], has_next_page: false })
     }
 
-    fn get_anime_update(anime: Anime, needs_details: bool, needs_episodes: bool) -> Anime {
-        anime
+    fn get_anime_update(anime: Anime, _needs_details: bool, _needs_episodes: bool) -> Result<Anime> {
+        Ok(anime)
     }
 
-    fn get_video_list(anime: Anime, episode: Episode) -> Vec<Video> {
-        vec![]
+    fn get_video_list(_anime: Anime, _episode: Episode) -> Result<Vec<Video>> {
+        Ok(vec![])
     }
 }
 
