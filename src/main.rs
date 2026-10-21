@@ -1,6 +1,7 @@
 mod cli;
 mod commands;
 mod models;
+mod wasm;
 
 use anyhow::Result;
 use clap::Parser;
