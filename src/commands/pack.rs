@@ -1,8 +1,9 @@
-use crate::models::{CargoToml, PluginManifest};
+use crate::models::{CargoLock, CargoToml, PluginManifest};
+use crate::wasm::WasmInterface;
 use anyhow::{Context, Result, bail};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use zip::write::SimpleFileOptions;
 
@@ -72,6 +73,25 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
             .context("Failed to write updated manifest.json back")?;
     }
 
+    // What the module needs from the host is read from the module itself, so the manifest and
+    // repository index can't disagree with it.
+    let mut wasm_content = Vec::new();
+    File::open(&wasm_file)
+        .context("Failed to open Wasm file")?
+        .read_to_end(&mut wasm_content)
+        .context("Failed to read wasm content")?;
+    let interface = WasmInterface::read(&wasm_content)?;
+    let unknown_imports = interface.unknown_imports();
+    if !unknown_imports.is_empty() {
+        bail!(
+            "The plugin imports functions no Ito host provides: {}",
+            unknown_imports.join(", ")
+        );
+    }
+    manifest.abi = Some(interface.abi());
+    manifest.imports = Some(interface.import_names());
+    manifest.sdk = sdk_version(&plugin_dir)?;
+
     let final_manifest_content =
         serde_json::to_string(&manifest).context("Failed to serialize manifest")?;
 
@@ -84,11 +104,6 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
 
     zip.start_file("main.wasm", options)
         .context("Failed to start main.wasm in zip")?;
-    let mut wasm_content = Vec::new();
-    File::open(&wasm_file)
-        .context("Failed to open Wasm file")?
-        .read_to_end(&mut wasm_content)
-        .context("Failed to read wasm content")?;
     zip.write_all(&wasm_content)
         .context("Failed to write wasm content to zip")?;
 
@@ -117,4 +132,33 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
         output_file.display()
     );
     Ok(())
+}
+
+/// The ito-rs version the plugin was built with, from the nearest Cargo.lock: "ito-rs 0.1.0", or
+/// "ito-rs 0.1.0 (39749ae)" for a git dependency. None when there's no lock or no ito-rs.
+fn sdk_version(plugin_dir: &Path) -> Result<Option<String>> {
+    let Some(lock_path) = plugin_dir
+        .ancestors()
+        .map(|dir| dir.join("Cargo.lock"))
+        .find(|path| path.exists())
+    else {
+        return Ok(None);
+    };
+    let lock_content = std::fs::read_to_string(&lock_path).context("Failed to read Cargo.lock")?;
+    let lock: CargoLock = toml::from_str(&lock_content).context("Failed to parse Cargo.lock")?;
+    Ok(lock
+        .package
+        .into_iter()
+        .find(|package| package.name == "ito-rs")
+        .map(|package| {
+            let revision = package
+                .source
+                .as_deref()
+                .and_then(|source| source.split_once('#'))
+                .map(|(_, revision)| revision.chars().take(7).collect::<String>());
+            match revision {
+                Some(revision) => format!("ito-rs {} ({revision})", package.version),
+                None => format!("ito-rs {}", package.version),
+            }
+        }))
 }

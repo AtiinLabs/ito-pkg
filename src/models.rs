@@ -10,6 +10,18 @@ pub struct CargoPackage {
     pub name: String,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct CargoLock {
+    #[serde(default)]
+    pub package: Vec<LockedPackage>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct LockedPackage {
+    pub name: String,
+    pub version: String,
+    pub source: Option<String>,
+}
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginManifest {
     pub id: String,
@@ -32,6 +44,16 @@ pub struct PluginManifest {
     pub archived: Option<bool>,
     pub archived_reason: Option<String>,
     pub archived_date: Option<String>,
+    /// The ABI the plugin was built for. Written by `pack` from the module's `ito_abi_version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<u32>,
+    /// The SDK the plugin was built with, such as "ito-rs 0.1.0". Written by `pack`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<String>,
+    /// Every function the plugin imports, as "module.name". Written by `pack`; hosts compare it
+    /// with the functions they provide before downloading the plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -48,6 +70,12 @@ pub struct RepoPackage {
     pub archived: Option<bool>,
     pub archived_reason: Option<String>,
     pub archived_date: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

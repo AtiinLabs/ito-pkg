@@ -48,9 +48,21 @@ Output:
 - `target/wasm32-unknown-unknown/release/<name>.wasm`: The compiled binary.
 - `<name>.ito`: The final distributable package containing the Wasm binary, manifest, and icon.
 
+`pack` reads the compiled module and records in the packaged manifest (not in your
+`manifest.json`) what Ito needs to know before running it:
+
+- `abi`: the ABI version the plugin was built for (its `ito_abi_version` export; 1 for plugins
+  built before the export existed).
+- `imports`: every host function the plugin imports, as `module.name`.
+- `sdk`: the ito-rs version from `Cargo.lock`.
+
+It refuses a module that imports functions no Ito host provides. The repository index carries
+the same fields, so Ito can refuse a plugin it can't run before downloading it.
+
 ### 4. Verify a Package
 
-Check the contents and validity of an `.ito` file.
+Check the contents and validity of an `.ito` file: the manifest, that `main.wasm` imports only
+functions Ito hosts provide, and that the manifest's `abi` and `imports` match the module.
 
 ```bash
 ito-pkg verify <path-to-ito-file>

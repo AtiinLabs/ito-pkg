@@ -1,4 +1,5 @@
 use crate::models::PluginManifest;
+use crate::wasm::WasmInterface;
 use anyhow::{Context, Result, bail};
 use std::fs::File;
 use std::io::Read;
@@ -41,11 +42,46 @@ pub fn verify_plugin(path: PathBuf) -> Result<()> {
 
     let manifest: PluginManifest = serde_json::from_str(&manifest_str)
         .context("Verification failed: Invalid manifest JSON")?;
+    drop(manifest_file);
+
+    let mut wasm = Vec::new();
+    archive
+        .by_name("main.wasm")
+        .context("Failed to open main.wasm inside archive")?
+        .read_to_end(&mut wasm)
+        .context("Failed to read main.wasm")?;
+    let interface = WasmInterface::read(&wasm).context("Verification failed: Invalid main.wasm")?;
+
+    let unknown_imports = interface.unknown_imports();
+    if !unknown_imports.is_empty() {
+        bail!(
+            "Verification failed: the plugin imports functions no Ito host provides: {}",
+            unknown_imports.join(", ")
+        );
+    }
+    if let Some(abi) = manifest.abi
+        && abi != interface.abi()
+    {
+        bail!(
+            "Verification failed: manifest says ABI {abi}, main.wasm is ABI {}",
+            interface.abi()
+        );
+    }
+    if let Some(imports) = &manifest.imports
+        && *imports != interface.import_names()
+    {
+        bail!(
+            "Verification failed: manifest imports {:?} don't match main.wasm's {:?}",
+            imports,
+            interface.import_names()
+        );
+    }
 
     tracing::info!(
-        "Plugin {} v{} verified successfully.",
+        "Plugin {} v{} verified successfully (ABI {}).",
         manifest.name,
-        manifest.version
+        manifest.version,
+        interface.abi()
     );
     Ok(())
 }
