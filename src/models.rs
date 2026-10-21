@@ -21,7 +21,10 @@ pub struct LockedPackage {
     pub name: String,
     pub version: String,
     pub source: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PluginManifest {
     pub id: String,

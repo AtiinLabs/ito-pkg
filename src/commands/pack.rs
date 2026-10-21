@@ -80,7 +80,8 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
         .context("Failed to open Wasm file")?
         .read_to_end(&mut wasm_content)
         .context("Failed to read wasm content")?;
-    let interface = WasmInterface::read(&wasm_content)?;
+    let interface = WasmInterface::read(&wasm_content)
+        .with_context(|| format!("Failed to read {}", wasm_file.display()))?;
     let unknown_imports = interface.unknown_imports();
     if !unknown_imports.is_empty() {
         bail!(
@@ -90,7 +91,7 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
     }
     manifest.abi = Some(interface.abi());
     manifest.imports = Some(interface.import_names());
-    manifest.sdk = sdk_version(&plugin_dir)?;
+    manifest.sdk = sdk_version(&plugin_dir, &plugin_name)?;
 
     let final_manifest_content =
         serde_json::to_string(&manifest).context("Failed to serialize manifest")?;
@@ -134,9 +135,11 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// The ito-rs version the plugin was built with, from the nearest Cargo.lock: "ito-rs 0.1.0", or
-/// "ito-rs 0.1.0 (39749ae)" for a git dependency. None when there's no lock or no ito-rs.
-fn sdk_version(plugin_dir: &Path) -> Result<Option<String>> {
+/// The ito-rs version the plugin was built with, from the nearest Cargo.lock: "ito-rs 0.1.0" for a
+/// registry release, "ito-rs 0.1.0 (39749ae)" for a git dependency, "ito-rs 0.1.0 (path)" for a
+/// local checkout. The plugin's own dependency entry picks the ito-rs when the lock has several.
+/// None when there's no lock or no ito-rs.
+fn sdk_version(plugin_dir: &Path, plugin_name: &str) -> Result<Option<String>> {
     let Some(lock_path) = plugin_dir
         .ancestors()
         .map(|dir| dir.join("Cargo.lock"))
@@ -146,19 +149,44 @@ fn sdk_version(plugin_dir: &Path) -> Result<Option<String>> {
     };
     let lock_content = std::fs::read_to_string(&lock_path).context("Failed to read Cargo.lock")?;
     let lock: CargoLock = toml::from_str(&lock_content).context("Failed to parse Cargo.lock")?;
+
+    // A dependency entry is "ito-rs", "ito-rs 0.1.0" or "ito-rs 0.1.0 (source)", as specific as
+    // the lock needs it to be to tell several apart.
+    let dependency = lock
+        .package
+        .iter()
+        .find(|package| package.name == plugin_name)
+        .and_then(|plugin| {
+            plugin
+                .dependencies
+                .iter()
+                .find(|entry| entry.split(' ').next() == Some("ito-rs"))
+        });
+    let mut wanted = dependency
+        .map(|entry| entry.splitn(3, ' ').skip(1))
+        .into_iter()
+        .flatten();
+    let wanted_version = wanted.next();
+    let wanted_source = wanted
+        .next()
+        .map(|source| source.trim_matches(|c| c == '(' || c == ')'));
+
     Ok(lock
         .package
-        .into_iter()
-        .find(|package| package.name == "ito-rs")
+        .iter()
+        .filter(|package| package.name == "ito-rs")
+        .find(|package| {
+            wanted_version.is_none_or(|version| version == package.version)
+                && wanted_source.is_none_or(|source| package.source.as_deref() == Some(source))
+        })
         .map(|package| {
-            let revision = package
-                .source
-                .as_deref()
-                .and_then(|source| source.split_once('#'))
-                .map(|(_, revision)| revision.chars().take(7).collect::<String>());
-            match revision {
-                Some(revision) => format!("ito-rs {} ({revision})", package.version),
-                None => format!("ito-rs {}", package.version),
-            }
+            let origin = match package.source.as_deref() {
+                None => "path".to_string(),
+                Some(source) => match source.split_once('#') {
+                    Some((_, revision)) => revision.chars().take(7).collect(),
+                    None => return format!("ito-rs {}", package.version),
+                },
+            };
+            format!("ito-rs {} ({origin})", package.version)
         }))
 }
