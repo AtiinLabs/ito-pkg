@@ -21,11 +21,9 @@ pub const HOST_IMPORTS: &[(&str, &[&str])] = &[
             "outer_html",
         ],
     ),
-    ("ito:core/js", &["evaluate"]),
     ("ito:core/std", &["print"]),
     ("ito:core/defaults", &["set", "get", "remove"]),
     ("ito:core/env", &["get_languages"]),
-    ("ito:core/ui", &["push_home_component"]),
     (
         "ito:core/webview",
         &[
