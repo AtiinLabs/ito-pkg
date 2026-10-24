@@ -121,13 +121,14 @@ impl WasmInterface {
     }
 
     /// The kinds the plugin serves, in `KINDS` order: from `ito_supported_kinds`, which ABI 2
-    /// plugins must export. None for older plugins, which serve their manifest `type`.
+    /// plugins must export. None for older plugins, which serve their manifest `type`; hosts
+    /// ignore the export below ABI 2, so it is ignored here too.
     pub fn kinds(&self) -> Result<Option<Vec<&'static str>>> {
-        let Some(mask) = self.kinds_export else {
-            if self.abi() >= 2 {
-                bail!("An ABI {} plugin must export {KINDS_EXPORT}", self.abi());
-            }
+        if self.abi() < 2 {
             return Ok(None);
+        }
+        let Some(mask) = self.kinds_export else {
+            bail!("An ABI {} plugin must export {KINDS_EXPORT}", self.abi());
         };
         let known = (1u32 << KINDS.len()) - 1;
         if mask == 0 || mask & !known != 0 {
@@ -263,6 +264,9 @@ mod tests {
         assert_eq!(interface.kinds()?, Some(vec!["manga", "novel"]));
         let older = module(r#"(func (export "get_home") (result i64) i64.const 0)"#)?;
         assert_eq!(older.kinds()?, None);
+        // Hosts read kinds from ABI 2 on, so an older module's export is not recorded.
+        let early = module(r#"(func (export "ito_supported_kinds") (result i32) i32.const 4)"#)?;
+        assert_eq!(early.kinds()?, None);
         Ok(())
     }
 
