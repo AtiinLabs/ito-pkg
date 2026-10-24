@@ -129,34 +129,35 @@ fn check_kinds(manifest: &PluginManifest, kinds: Option<Vec<&str>>) -> Result<()
 mod tests {
     use super::*;
 
-    fn manifest(plugin_type: &str, kinds: Option<&[&str]>) -> PluginManifest {
+    fn manifest(plugin_type: &str, kinds: Option<&[&str]>) -> Result<PluginManifest> {
         let mut manifest: PluginManifest = serde_json::from_value(serde_json::json!({
             "id": "p", "name": "P", "version": "1.0.0", "min_app_version": "1.0.0", "type": plugin_type
-        }))
-        .unwrap();
+        }))?;
         manifest.kinds = kinds.map(|kinds| kinds.iter().map(|kind| kind.to_string()).collect());
-        manifest
+        Ok(manifest)
     }
 
     #[test]
-    fn an_abi_2_manifest_must_list_exactly_the_modules_kinds() {
+    fn an_abi_2_manifest_must_list_exactly_the_modules_kinds() -> Result<()> {
         let served = Some(vec!["manga", "novel"]);
         assert!(
             check_kinds(
-                &manifest("novel", Some(&["manga", "novel"])),
+                &manifest("novel", Some(&["manga", "novel"]))?,
                 served.clone()
             )
             .is_ok()
         );
-        assert!(check_kinds(&manifest("novel", Some(&["novel"])), served.clone()).is_err());
-        assert!(check_kinds(&manifest("novel", None), served.clone()).is_err());
-        assert!(check_kinds(&manifest("anime", Some(&["manga", "novel"])), served).is_err());
+        assert!(check_kinds(&manifest("novel", Some(&["novel"]))?, served.clone()).is_err());
+        assert!(check_kinds(&manifest("novel", None)?, served.clone()).is_err());
+        assert!(check_kinds(&manifest("anime", Some(&["manga", "novel"]))?, served).is_err());
+        Ok(())
     }
 
     #[test]
-    fn an_older_manifest_names_one_known_kind_and_no_kinds_list() {
-        assert!(check_kinds(&manifest("anime", None), None).is_ok());
-        assert!(check_kinds(&manifest("Manga", None), None).is_err());
-        assert!(check_kinds(&manifest("manga", Some(&["manga"])), None).is_err());
+    fn an_older_manifest_names_one_known_kind_and_no_kinds_list() -> Result<()> {
+        assert!(check_kinds(&manifest("anime", None)?, None).is_ok());
+        assert!(check_kinds(&manifest("Manga", None)?, None).is_err());
+        assert!(check_kinds(&manifest("manga", Some(&["manga"]))?, None).is_err());
+        Ok(())
     }
 }
