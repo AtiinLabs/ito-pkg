@@ -97,6 +97,7 @@ pub fn build_repo(
                 icon_url,
                 sha256: sha256_hash,
                 plugin_type: manifest.plugin_type.clone(),
+                kinds: manifest.kinds.clone(),
                 abi: manifest.abi,
                 sdk: manifest.sdk.clone(),
                 imports: manifest.imports.clone(),

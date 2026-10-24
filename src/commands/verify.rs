@@ -76,6 +76,28 @@ pub fn verify_plugin(path: PathBuf) -> Result<()> {
             interface.import_names()
         );
     }
+    if let Some(kinds) = interface
+        .kinds()
+        .context("Verification failed: Invalid main.wasm")?
+    {
+        let listed: Vec<&str> = manifest
+            .kinds
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if listed != kinds {
+            bail!(
+                "Verification failed: manifest kinds {listed:?} don't match main.wasm's {kinds:?}"
+            );
+        }
+        if !kinds.contains(&manifest.plugin_type.as_str()) {
+            bail!(
+                "Verification failed: manifest type \"{}\" is not one of its kinds {kinds:?}",
+                manifest.plugin_type
+            );
+        }
+    }
 
     tracing::info!(
         "Plugin {} v{} verified successfully (ABI {}).",
