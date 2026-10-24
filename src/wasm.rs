@@ -22,7 +22,7 @@ pub const HOST_IMPORTS: &[(&str, &[&str])] = &[
         ],
     ),
     ("ito:core/std", &["print"]),
-    ("ito:core/defaults", &["set", "get", "remove"]),
+    ("ito:core/defaults", &["set", "get", "remove", "set_secret"]),
     ("ito:core/env", &["get_languages"]),
     (
         "ito:core/webview",
