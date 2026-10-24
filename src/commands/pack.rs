@@ -90,6 +90,15 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
         );
     }
     manifest.abi = Some(interface.abi());
+    if let Some(kinds) = interface.kinds()? {
+        manifest.set_kinds(&kinds);
+    } else if !crate::wasm::KINDS.contains(&manifest.plugin_type.as_str()) {
+        bail!(
+            "Manifest type \"{}\" must be one of {:?}",
+            manifest.plugin_type,
+            crate::wasm::KINDS
+        );
+    }
     manifest.imports = Some(interface.import_names());
     manifest.sdk = sdk_version(&plugin_dir, &plugin_name)?;
 

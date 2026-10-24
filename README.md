@@ -53,16 +53,21 @@ Output:
 
 - `abi`: the ABI version the plugin was built for (its `ito_abi_version` export; 1 for plugins
   built before the export existed).
+- `kinds`: the media kinds the plugin serves (`manga`, `anime`, `novel`), from its
+  `ito_supported_kinds` export, which ABI 2 plugins must have. `type` stays your primary kind
+  when it is one of them and becomes the first otherwise; older plugins serve their `type` alone.
 - `imports`: every host function the plugin imports, as `module.name`.
 - `sdk`: the ito-rs version from `Cargo.lock`.
 
-It refuses a module that imports functions no Ito host provides. The repository index carries
-the same fields, so Ito can refuse a plugin it can't run before downloading it.
+It refuses a module that imports functions no Ito host provides, and an ABI 2 module that names
+no known kind. The repository index carries the same fields, so Ito can refuse a plugin it
+can't run before downloading it.
 
 ### 4. Verify a Package
 
 Check the contents and validity of an `.ito` file: the manifest, that `main.wasm` imports only
-functions Ito hosts provide, and that the manifest's `abi` and `imports` match the module.
+functions Ito hosts provide, and that the manifest's `abi`, `kinds`, `type` and `imports` match
+the module.
 
 ```bash
 ito-pkg verify <path-to-ito-file>

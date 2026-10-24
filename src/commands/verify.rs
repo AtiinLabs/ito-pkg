@@ -76,6 +76,12 @@ pub fn verify_plugin(path: PathBuf) -> Result<()> {
             interface.import_names()
         );
     }
+    check_kinds(
+        &manifest,
+        interface
+            .kinds()
+            .context("Verification failed: Invalid main.wasm")?,
+    )?;
 
     tracing::info!(
         "Plugin {} v{} verified successfully (ABI {}).",
@@ -84,4 +90,74 @@ pub fn verify_plugin(path: PathBuf) -> Result<()> {
         interface.abi()
     );
     Ok(())
+}
+
+/// The manifest's `kinds` and `type` must be what the module serves: its kinds from ABI 2, its
+/// `type` alone before.
+fn check_kinds(manifest: &PluginManifest, kinds: Option<Vec<&str>>) -> Result<()> {
+    let Some(kinds) = kinds else {
+        if manifest.kinds.is_some() {
+            bail!("Verification failed: kinds are only recorded for ABI 2 plugins");
+        }
+        if !crate::wasm::KINDS.contains(&manifest.plugin_type.as_str()) {
+            bail!(
+                "Verification failed: manifest type \"{}\" is not a kind",
+                manifest.plugin_type
+            );
+        }
+        return Ok(());
+    };
+    let listed: Vec<&str> = manifest
+        .kinds
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if listed != kinds {
+        bail!("Verification failed: manifest kinds {listed:?} don't match main.wasm's {kinds:?}");
+    }
+    if !kinds.contains(&manifest.plugin_type.as_str()) {
+        bail!(
+            "Verification failed: manifest type \"{}\" is not one of its kinds {kinds:?}",
+            manifest.plugin_type
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(plugin_type: &str, kinds: Option<&[&str]>) -> Result<PluginManifest> {
+        let mut manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "version": "1.0.0", "min_app_version": "1.0.0", "type": plugin_type
+        }))?;
+        manifest.kinds = kinds.map(|kinds| kinds.iter().map(|kind| kind.to_string()).collect());
+        Ok(manifest)
+    }
+
+    #[test]
+    fn an_abi_2_manifest_must_list_exactly_the_modules_kinds() -> Result<()> {
+        let served = Some(vec!["manga", "novel"]);
+        assert!(
+            check_kinds(
+                &manifest("novel", Some(&["manga", "novel"]))?,
+                served.clone()
+            )
+            .is_ok()
+        );
+        assert!(check_kinds(&manifest("novel", Some(&["novel"]))?, served.clone()).is_err());
+        assert!(check_kinds(&manifest("novel", None)?, served.clone()).is_err());
+        assert!(check_kinds(&manifest("anime", Some(&["manga", "novel"]))?, served).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn an_older_manifest_names_one_known_kind_and_no_kinds_list() -> Result<()> {
+        assert!(check_kinds(&manifest("anime", None)?, None).is_ok());
+        assert!(check_kinds(&manifest("Manga", None)?, None).is_err());
+        assert!(check_kinds(&manifest("manga", Some(&["manga"]))?, None).is_err());
+        Ok(())
+    }
 }
