@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
-use wasmparser::{ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef};
+use wasmparser::{
+    CompositeInnerType, ExternalKind, FuncType, FunctionBody, Operator, Parser, Payload, TypeRef,
+    ValType,
+};
 
 /// The host functions an Ito host provides, by module. Keep in step with ito-runner's import
 /// table (`WasmBridge.buildImportTable`): a plugin importing anything else can't load.
@@ -62,6 +65,10 @@ impl WasmInterface {
     pub fn read(bytes: &[u8]) -> Result<Self> {
         let mut imports = Vec::new();
         let mut has_start_section = false;
+        // Function types by type index, and the type index of every function: imports first, then
+        // the module's own, which is the order of the function index space.
+        let mut types: Vec<Option<FuncType>> = Vec::new();
+        let mut function_types: Vec<u32> = Vec::new();
         let mut imported_functions = 0u32;
         let mut defined_functions = 0u32;
         let mut abi_function = None;
@@ -71,24 +78,42 @@ impl WasmInterface {
 
         for payload in Parser::new(0).parse_all(bytes) {
             match payload.context("Invalid WebAssembly module")? {
+                Payload::TypeSection(reader) => {
+                    for group in reader {
+                        for ty in group.context("Invalid type")?.into_types() {
+                            types.push(match ty.composite_type.inner {
+                                CompositeInnerType::Func(func) => Some(func),
+                                _ => None,
+                            });
+                        }
+                    }
+                }
                 Payload::ImportSection(reader) => {
                     for import in reader.into_imports() {
                         let import = import.context("Invalid import")?;
-                        if matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+                        if let TypeRef::Func(ty) | TypeRef::FuncExact(ty) = import.ty {
                             imported_functions += 1;
+                            function_types.push(ty);
                         }
                         imports.push((import.module.to_string(), import.name.to_string()));
+                    }
+                }
+                Payload::FunctionSection(reader) => {
+                    for ty in reader {
+                        function_types.push(ty.context("Invalid function")?);
                     }
                 }
                 Payload::ExportSection(reader) => {
                     for export in reader {
                         let export = export.context("Invalid export")?;
                         if export.kind == ExternalKind::Func {
-                            match export.name {
-                                ABI_EXPORT => abi_function = Some(export.index),
-                                KINDS_EXPORT => kinds_function = Some(export.index),
-                                _ => {}
-                            }
+                            let (name, slot) = match export.name {
+                                ABI_EXPORT => (ABI_EXPORT, &mut abi_function),
+                                KINDS_EXPORT => (KINDS_EXPORT, &mut kinds_function),
+                                _ => continue,
+                            };
+                            require_nullary_i32(name, export.index, &function_types, &types)?;
+                            *slot = Some(export.index);
                         }
                     }
                 }
@@ -212,6 +237,35 @@ impl WasmInterface {
             .collect();
         names.into_iter().collect()
     }
+}
+
+/// Fails unless the function at `index` is `() -> i32`, the type hosts call `export` through.
+fn require_nullary_i32(
+    export: &str,
+    index: u32,
+    function_types: &[u32],
+    types: &[Option<FuncType>],
+) -> Result<()> {
+    let signature = function_types
+        .get(index as usize)
+        .and_then(|ty| types.get(*ty as usize))
+        .and_then(Option::as_ref)
+        .with_context(|| format!("{export} refers to a function with no known type"))?;
+    if signature.params().is_empty() && signature.results() == [ValType::I32] {
+        return Ok(());
+    }
+    let list = |types: &[ValType]| {
+        types
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    bail!(
+        "{export} must be a function () -> i32, but it is ({}) -> ({})",
+        list(signature.params()),
+        list(signature.results())
+    )
 }
 
 /// The value of a function whose body is a single `i32.const`, as the SDK's `ito_abi_version` and
@@ -383,6 +437,53 @@ mod tests {
         let bytes = wasm(&format!("{ABI_3} (func $init) (start $init)"))?;
         assert!(WasmInterface::inspect(&bytes, None).is_err());
         assert!(WasmInterface::inspect(&bytes, Some(3)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_an_abi_export_that_takes_a_parameter() -> Result<()> {
+        let bytes = wasm(
+            r#"
+            (func (export "ito_abi_version") (param i32) (result i32) i32.const 3)
+            (func (export "ito_supported_kinds") (result i32) i32.const 1)
+            "#,
+        )?;
+        let error = WasmInterface::inspect(&bytes, None)
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("ito_abi_version must be a function () -> i32, but it is (i32) -> (i32)")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_a_kinds_export_that_returns_i64() -> Result<()> {
+        let bytes = wasm(
+            r#"
+            (func (export "ito_abi_version") (result i32) i32.const 3)
+            (func (export "ito_supported_kinds") (result i64) i64.const 1)
+            "#,
+        )?;
+        let error = WasmInterface::inspect(&bytes, None)
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("ito_supported_kinds must be a function () -> i32, but it is () -> (i64)")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_an_export_with_extra_results() -> Result<()> {
+        let bytes = wasm(
+            r#"
+            (func (export "ito_abi_version") (result i32 i32) i32.const 3 i32.const 0)
+            "#,
+        )?;
+        assert!(WasmInterface::inspect(&bytes, None).is_err());
         Ok(())
     }
 
