@@ -88,12 +88,28 @@ pub fn scaffold_plugin(name: &str, plugin_type: &str) -> Result<()> {
     std::fs::write(project_dir.join("src/lib.rs"), lib_rs_rendered)
         .context("Failed to write src/lib.rs")?;
 
+    // `pack` builds with --locked, so a new plugin needs its lock file from the start.
+    let status = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&project_dir)
+        .status()
+        .context("Failed to run cargo generate-lockfile")?;
+    if !status.success() {
+        bail!(
+            "Scaffolded {name}, but `cargo generate-lockfile` failed; run it in the project \
+             directory before `ito-pkg pack`"
+        );
+    }
+
     tracing::info!(
         "Plugin {} scaffolded successfully at {:?}",
         name,
         project_dir
     );
-    tracing::info!("\nNext steps:\n  cd {}\n  ito-pkg pack", name);
+    tracing::info!(
+        "\nNext steps:\n  cd {}\n  git add Cargo.lock  # `ito-pkg pack` builds with --locked\n  ito-pkg pack",
+        name
+    );
 
     Ok(())
 }

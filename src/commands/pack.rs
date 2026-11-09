@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use zip::write::SimpleFileOptions;
 
-pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
+pub fn pack_plugin(plugin_dir: PathBuf, expected_abi: Option<u32>) -> Result<()> {
     let plugin_dir = plugin_dir
         .canonicalize()
         .context("Failed to canonicalize plugin directory path")?;
@@ -28,6 +28,7 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
     tracing::info!("Building plugin...");
     let status = Command::new("cargo")
         .arg("build")
+        .arg("--locked")
         .arg("--target")
         .arg("wasm32-unknown-unknown")
         .arg("--release")
@@ -65,12 +66,15 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
     let mut manifest = serde_json::from_str::<PluginManifest>(&manifest_content)
         .context("Invalid manifest.json format")?;
 
+    // The archive date is recorded in the package now but written back to the source manifest
+    // only once the module has passed inspection, so a refused pack leaves the source untouched.
+    let mut archived_writeback = None;
     if manifest.archived.unwrap_or(false) && manifest.archived_date.is_none() {
         manifest.archived_date = Some(chrono::Utc::now().format("%Y-%m-%d").to_string());
-        let new_manifest_content = serde_json::to_string_pretty(&manifest)
-            .context("Failed to serialize updated manifest")?;
-        std::fs::write(&manifest_file, &new_manifest_content)
-            .context("Failed to write updated manifest.json back")?;
+        archived_writeback = Some(
+            serde_json::to_string_pretty(&manifest)
+                .context("Failed to serialize updated manifest")?,
+        );
     }
 
     // What the module needs from the host is read from the module itself, so the manifest and
@@ -80,15 +84,8 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
         .context("Failed to open Wasm file")?
         .read_to_end(&mut wasm_content)
         .context("Failed to read wasm content")?;
-    let interface = WasmInterface::read(&wasm_content)
-        .with_context(|| format!("Failed to read {}", wasm_file.display()))?;
-    let unknown_imports = interface.unknown_imports();
-    if !unknown_imports.is_empty() {
-        bail!(
-            "The plugin imports functions no Ito host provides: {}",
-            unknown_imports.join(", ")
-        );
-    }
+    let interface = WasmInterface::inspect(&wasm_content, expected_abi)
+        .with_context(|| format!("Refusing to package {}", wasm_file.display()))?;
     manifest.abi = Some(interface.abi());
     if let Some(kinds) = interface.kinds()? {
         manifest.set_kinds(&kinds);
@@ -104,6 +101,11 @@ pub fn pack_plugin(plugin_dir: PathBuf) -> Result<()> {
 
     let final_manifest_content =
         serde_json::to_string(&manifest).context("Failed to serialize manifest")?;
+
+    if let Some(content) = archived_writeback {
+        std::fs::write(&manifest_file, content)
+            .context("Failed to write updated manifest.json back")?;
+    }
 
     let output_file = plugin_dir.join(format!("{}.ito", plugin_name));
     tracing::info!("Creating package: {:?}", output_file);

@@ -1,9 +1,31 @@
 use crate::models::{PluginManifest, RepoIndex, RepoPackage};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// The manifest of an `.ito` file, or None if it can't be read; the build below warns about those.
+fn read_manifest(path: &Path) -> Option<PluginManifest> {
+    let mut archive = zip::ZipArchive::new(File::open(path).ok()?).ok()?;
+    let mut manifest_file = archive.by_name("manifest.json").ok()?;
+    let mut content = String::new();
+    manifest_file.read_to_string(&mut content).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Fails if any package in `input` has a manifest without an `abi`.
+fn require_abi_in_every_package(input: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(input).context("Failed to read input directory")? {
+        let path = entry.context("Failed to read directory entry")?.path();
+        if path.extension().is_some_and(|ext| ext == "ito")
+            && read_manifest(&path).is_some_and(|manifest| manifest.abi.is_none())
+        {
+            bail!("{path:?} has a manifest without an abi; build it with `ito-pkg pack`");
+        }
+    }
+    Ok(())
+}
 
 pub fn build_repo(
     input: PathBuf,
@@ -12,6 +34,9 @@ pub fn build_repo(
     url: &str,
     description: &str,
 ) -> Result<()> {
+    // Refuse before writing anything, so a refusal leaves no partial repository.
+    require_abi_in_every_package(&input)?;
+
     if !output.exists() {
         std::fs::create_dir_all(&output).context("Failed to create output directory")?;
     }
@@ -132,4 +157,99 @@ pub fn build_repo(
 
     tracing::info!("Repository built successfully at {:?}", output);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory removed on drop, unique per test and process.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Result<Self> {
+            let dir = std::env::temp_dir().join(format!("ito-pkg-{}-{name}", std::process::id()));
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+            }
+            std::fs::create_dir_all(&dir)?;
+            Ok(Self(dir))
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Writes `<dir>/<file>.ito` holding only the manifest, which is all `repo` reads besides the
+    /// icon.
+    fn write_package(dir: &Path, file: &str, manifest: &serde_json::Value) -> Result<()> {
+        let mut zip = zip::ZipWriter::new(File::create(dir.join(format!("{file}.ito")))?);
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())?;
+        zip.write_all(manifest.to_string().as_bytes())?;
+        zip.finish()?;
+        Ok(())
+    }
+
+    fn manifest(id: &str, abi: Option<u32>) -> serde_json::Value {
+        let mut manifest = serde_json::json!({
+            "id": id, "name": "P", "version": "1.0.0", "min_app_version": "1.5.0",
+            "type": "manga", "kinds": ["manga"], "imports": []
+        });
+        if let (Some(abi), Some(fields)) = (abi, manifest.as_object_mut()) {
+            fields.insert("abi".to_string(), abi.into());
+        }
+        manifest
+    }
+
+    #[test]
+    fn a_package_without_an_abi_is_refused_and_not_published() -> Result<()> {
+        let scratch = Scratch::new("repo-no-abi")?;
+        let (input, output) = (scratch.0.join("in"), scratch.0.join("out"));
+        std::fs::create_dir_all(&input)?;
+        write_package(&input, "p", &manifest("p", None))?;
+
+        let error = build_repo(input, output.clone(), "R", "https://example.test", "d")
+            .err()
+            .map(|error| error.to_string());
+
+        assert!(
+            error.is_some_and(|message| message.contains("abi")),
+            "expected a refusal naming the missing abi"
+        );
+        assert!(!output.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn one_package_without_an_abi_leaves_nothing_written_for_the_others() -> Result<()> {
+        let scratch = Scratch::new("repo-mixed")?;
+        let (input, output) = (scratch.0.join("in"), scratch.0.join("out"));
+        std::fs::create_dir_all(&input)?;
+        write_package(&input, "a", &manifest("a", Some(3)))?;
+        write_package(&input, "b", &manifest("b", None))?;
+
+        assert!(build_repo(input, output.clone(), "R", "https://example.test", "d").is_err());
+
+        // Whichever order the directory lists them in, the valid package is not copied either.
+        assert!(!output.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_package_with_an_abi_is_indexed_with_it() -> Result<()> {
+        let scratch = Scratch::new("repo-abi")?;
+        let (input, output) = (scratch.0.join("in"), scratch.0.join("out"));
+        std::fs::create_dir_all(&input)?;
+        write_package(&input, "p", &manifest("p", Some(3)))?;
+
+        build_repo(input, output.clone(), "R", "https://example.test", "d")?;
+
+        let index: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(output.join("index.json"))?)?;
+        assert_eq!(index["packages"][0]["abi"], 3);
+        Ok(())
+    }
 }

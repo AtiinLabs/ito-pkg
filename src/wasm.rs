@@ -53,11 +53,15 @@ pub struct WasmInterface {
     pub abi_export: Option<u32>,
     /// The constant `ito_supported_kinds` returns, if the module exports it.
     pub kinds_export: Option<u32>,
+    /// Whether the module has a start section, which runs code at instantiation, before the
+    /// host has called any export.
+    pub has_start_section: bool,
 }
 
 impl WasmInterface {
     pub fn read(bytes: &[u8]) -> Result<Self> {
         let mut imports = Vec::new();
+        let mut has_start_section = false;
         let mut imported_functions = 0u32;
         let mut defined_functions = 0u32;
         let mut abi_function = None;
@@ -98,6 +102,7 @@ impl WasmInterface {
                     }
                     defined_functions += 1;
                 }
+                Payload::StartSection { .. } => has_start_section = true,
                 _ => {}
             }
         }
@@ -112,12 +117,50 @@ impl WasmInterface {
             imports,
             abi_export,
             kinds_export,
+            has_start_section,
         })
     }
 
     /// The ABI the plugin was built for: its `ito_abi_version`, or 1 without one.
     pub fn abi(&self) -> u32 {
         self.abi_export.unwrap_or(UNVERSIONED_ABI)
+    }
+
+    /// Fails unless the module is built for the ABI the caller expects. `None` accepts any.
+    fn require_abi(&self, expected: Option<u32>) -> Result<()> {
+        match expected {
+            Some(expected) if expected != self.abi() => bail!(
+                "The plugin is built for ABI {}, but ABI {expected} is expected",
+                self.abi()
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Fails when the module has a start section. Hosts instantiate a plugin before calling any
+    /// of its exports, so start-section code would run outside the host's calls.
+    fn require_no_start_section(&self) -> Result<()> {
+        if self.has_start_section {
+            bail!("The plugin has a start section; modules must do their work only in exports");
+        }
+        Ok(())
+    }
+
+    /// Reads a module and refuses what no Ito host can run: an invalid module, a start section,
+    /// imports no host provides, or an ABI other than `expected_abi` when one is required. `pack`
+    /// and `verify` both go through this, so they can't disagree about what is acceptable.
+    pub fn inspect(bytes: &[u8], expected_abi: Option<u32>) -> Result<Self> {
+        let interface = Self::read(bytes)?;
+        interface.require_no_start_section()?;
+        let unknown_imports = interface.unknown_imports();
+        if !unknown_imports.is_empty() {
+            bail!(
+                "The plugin imports functions no Ito host provides: {}",
+                unknown_imports.join(", ")
+            );
+        }
+        interface.require_abi(expected_abi)?;
+        Ok(interface)
     }
 
     /// The kinds the plugin serves, in `KINDS` order: from `ito_supported_kinds`, which ABI 2
@@ -290,6 +333,86 @@ mod tests {
             "#,
         );
         assert!(computed.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_start_section_is_detected_and_refused() -> Result<()> {
+        let started = module(r#"(func $init) (start $init)"#)?;
+        assert!(started.has_start_section);
+        assert!(started.require_no_start_section().is_err());
+
+        let plain = module(r#"(func $init) (func (export "get_home") (result i64) i64.const 0)"#)?;
+        assert!(!plain.has_start_section);
+        assert!(plain.require_no_start_section().is_ok());
+        Ok(())
+    }
+
+    const ABI_3: &str = r#"
+        (import "ito:core/net" "fetch_v2" (func (param i32 i32 i32 i32) (result i32)))
+        (func (export "ito_abi_version") (result i32) i32.const 3)
+        (func (export "ito_supported_kinds") (result i32) i32.const 1)
+    "#;
+
+    fn wasm(body: &str) -> Result<Vec<u8>> {
+        Ok(wat::parse_str(format!("(module {body})"))?)
+    }
+
+    #[test]
+    fn inspection_accepts_a_conforming_module_with_or_without_an_expectation() -> Result<()> {
+        let bytes = wasm(ABI_3)?;
+        assert_eq!(WasmInterface::inspect(&bytes, None)?.abi(), 3);
+        assert_eq!(WasmInterface::inspect(&bytes, Some(3))?.abi(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_another_abi_than_expected() -> Result<()> {
+        let error = WasmInterface::inspect(&wasm(ABI_3)?, Some(2))
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("The plugin is built for ABI 3, but ABI 2 is expected")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_a_start_section() -> Result<()> {
+        let bytes = wasm(&format!("{ABI_3} (func $init) (start $init)"))?;
+        assert!(WasmInterface::inspect(&bytes, None).is_err());
+        assert!(WasmInterface::inspect(&bytes, Some(3)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_imports_no_host_provides() -> Result<()> {
+        let bytes = wasm(&format!(
+            r#"(import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32))) {ABI_3}"#
+        ))?;
+        let error = WasmInterface::inspect(&bytes, None)
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("wasi_snapshot_preview1.fd_write"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_expected_abi_must_match_when_given() -> Result<()> {
+        let abi_3 = module(r#"(func (export "ito_abi_version") (result i32) i32.const 3)"#)?;
+        assert!(abi_3.require_abi(None).is_ok());
+        assert!(abi_3.require_abi(Some(3)).is_ok());
+        assert!(abi_3.require_abi(Some(2)).is_err());
+
+        // A module without the export is ABI 1 and is held to the expectation like any other.
+        let unversioned = module(r#"(func (export "get_home") (result i64) i64.const 0)"#)?;
+        assert!(unversioned.require_abi(Some(1)).is_ok());
+        assert!(unversioned.require_abi(Some(3)).is_err());
         Ok(())
     }
 }

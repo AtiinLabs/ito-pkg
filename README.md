@@ -27,6 +27,7 @@ ito-pkg new my-manga-source -t manga
 
 This creates a new directory with:
 - `Cargo.toml`: Configured for `cdylib` compilation.
+- `Cargo.lock`: Generated with `cargo generate-lockfile`, because `pack` builds with `--locked`.
 - `manifest.json`: Plugin metadata.
 - `src/lib.rs`: Starter code implementing the provider trait.
 
@@ -41,8 +42,13 @@ Add an icon to your plugin by placing an `icon.png` file in the project root.
 Compile your plugin to WebAssembly and bundle it into an `.ito` file.
 
 ```bash
-ito-pkg pack
+ito-pkg pack [--path <dir>] [--expect-abi <n>]
 ```
+
+The build runs `cargo build --locked`, so it fails instead of re-resolving a stale or missing
+`Cargo.lock` (`ito-pkg new` generates one; commit it). With `--expect-abi <n>` (or
+`ITO_EXPECTED_ABI=<n>`, where an empty value counts as unset), `pack` fails unless the compiled
+module is built for ABI `n`.
 
 Output:
 - `target/wasm32-unknown-unknown/release/<name>.wasm`: The compiled binary.
@@ -59,19 +65,23 @@ Output:
 - `imports`: every host function the plugin imports, as `module.name`.
 - `sdk`: the ito-rs version from `Cargo.lock`.
 
-It refuses a module that imports functions no Ito host provides, and an ABI 2 module that names
-no known kind. The repository index carries the same fields, so Ito can refuse a plugin it
+It refuses a module that imports functions no Ito host provides, a module with a start section
+(code that would run at instantiation, outside any export), and an ABI 2 or later module that
+names no known kind. The repository index carries the same fields, so Ito can refuse a plugin it
 can't run before downloading it.
 
 ### 4. Verify a Package
 
 Check the contents and validity of an `.ito` file: the manifest, that `main.wasm` imports only
 functions Ito hosts provide, and that the manifest's `abi`, `kinds`, `type` and `imports` match
-the module.
+the module. Unlike older versions, `verify` fails when the manifest has no `abi` or `imports`.
 
 ```bash
-ito-pkg verify <path-to-ito-file>
+ito-pkg verify <path-to-ito-file> [--expect-abi <n>]
 ```
+
+With `--expect-abi <n>` (or `ITO_EXPECTED_ABI=<n>`), `verify` also fails unless `main.wasm` is
+built for ABI `n`.
 
 ### 5. Create a Local Repository
 
@@ -91,6 +101,9 @@ This generates:
 - `public/index.min.json`: Minified index.
 - `public/packages/`: Directory containing `.ito` files.
 - `public/icons/`: Directory containing extracted icons.
+
+`repo` refuses any package whose manifest has no `abi`, so a package that was not built by
+`ito-pkg pack` can't reach the index.
 
 ### 6. Serve the Repository
 
