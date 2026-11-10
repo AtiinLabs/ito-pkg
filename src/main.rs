@@ -13,8 +13,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Pack { path } => pack::pack_plugin(path),
-        Commands::Verify { path } => verify::verify_plugin(path),
+        Commands::Pack { path, expect_abi } => {
+            pack::pack_plugin(path, cli::expected_abi(expect_abi)?)
+        }
+        Commands::Verify { path, expect_abi } => {
+            verify::verify_plugin(path, cli::expected_abi(expect_abi)?)
+        }
         Commands::Repo {
             input,
             output,

@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeSet;
-use wasmparser::{ExternalKind, FunctionBody, Operator, Parser, Payload, TypeRef};
+use wasmparser::{
+    CompositeInnerType, ExternalKind, FuncType, FunctionBody, Operator, Parser, Payload, TypeRef,
+    ValType,
+};
 
 /// The host functions an Ito host provides, by module. Keep in step with ito-runner's import
 /// table (`WasmBridge.buildImportTable`): a plugin importing anything else can't load.
@@ -53,11 +56,19 @@ pub struct WasmInterface {
     pub abi_export: Option<u32>,
     /// The constant `ito_supported_kinds` returns, if the module exports it.
     pub kinds_export: Option<u32>,
+    /// Whether the module has a start section, which runs code at instantiation, before the
+    /// host has called any export.
+    pub has_start_section: bool,
 }
 
 impl WasmInterface {
     pub fn read(bytes: &[u8]) -> Result<Self> {
         let mut imports = Vec::new();
+        let mut has_start_section = false;
+        // Function types by type index, and the type index of every function: imports first, then
+        // the module's own, which is the order of the function index space.
+        let mut types: Vec<Option<FuncType>> = Vec::new();
+        let mut function_types: Vec<u32> = Vec::new();
         let mut imported_functions = 0u32;
         let mut defined_functions = 0u32;
         let mut abi_function = None;
@@ -67,24 +78,42 @@ impl WasmInterface {
 
         for payload in Parser::new(0).parse_all(bytes) {
             match payload.context("Invalid WebAssembly module")? {
+                Payload::TypeSection(reader) => {
+                    for group in reader {
+                        for ty in group.context("Invalid type")?.into_types() {
+                            types.push(match ty.composite_type.inner {
+                                CompositeInnerType::Func(func) => Some(func),
+                                _ => None,
+                            });
+                        }
+                    }
+                }
                 Payload::ImportSection(reader) => {
                     for import in reader.into_imports() {
                         let import = import.context("Invalid import")?;
-                        if matches!(import.ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+                        if let TypeRef::Func(ty) | TypeRef::FuncExact(ty) = import.ty {
                             imported_functions += 1;
+                            function_types.push(ty);
                         }
                         imports.push((import.module.to_string(), import.name.to_string()));
+                    }
+                }
+                Payload::FunctionSection(reader) => {
+                    for ty in reader {
+                        function_types.push(ty.context("Invalid function")?);
                     }
                 }
                 Payload::ExportSection(reader) => {
                     for export in reader {
                         let export = export.context("Invalid export")?;
                         if export.kind == ExternalKind::Func {
-                            match export.name {
-                                ABI_EXPORT => abi_function = Some(export.index),
-                                KINDS_EXPORT => kinds_function = Some(export.index),
-                                _ => {}
-                            }
+                            let (name, slot) = match export.name {
+                                ABI_EXPORT => (ABI_EXPORT, &mut abi_function),
+                                KINDS_EXPORT => (KINDS_EXPORT, &mut kinds_function),
+                                _ => continue,
+                            };
+                            require_nullary_i32(name, export.index, &function_types, &types)?;
+                            *slot = Some(export.index);
                         }
                     }
                 }
@@ -98,6 +127,7 @@ impl WasmInterface {
                     }
                     defined_functions += 1;
                 }
+                Payload::StartSection { .. } => has_start_section = true,
                 _ => {}
             }
         }
@@ -112,12 +142,50 @@ impl WasmInterface {
             imports,
             abi_export,
             kinds_export,
+            has_start_section,
         })
     }
 
     /// The ABI the plugin was built for: its `ito_abi_version`, or 1 without one.
     pub fn abi(&self) -> u32 {
         self.abi_export.unwrap_or(UNVERSIONED_ABI)
+    }
+
+    /// Fails unless the module is built for the ABI the caller expects. `None` accepts any.
+    fn require_abi(&self, expected: Option<u32>) -> Result<()> {
+        match expected {
+            Some(expected) if expected != self.abi() => bail!(
+                "The plugin is built for ABI {}, but ABI {expected} is expected",
+                self.abi()
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Fails when the module has a start section. Hosts instantiate a plugin before calling any
+    /// of its exports, so start-section code would run outside the host's calls.
+    fn require_no_start_section(&self) -> Result<()> {
+        if self.has_start_section {
+            bail!("The plugin has a start section; modules must do their work only in exports");
+        }
+        Ok(())
+    }
+
+    /// Reads a module and refuses what no Ito host can run: an invalid module, a start section,
+    /// imports no host provides, or an ABI other than `expected_abi` when one is required. `pack`
+    /// and `verify` both go through this, so they can't disagree about what is acceptable.
+    pub fn inspect(bytes: &[u8], expected_abi: Option<u32>) -> Result<Self> {
+        let interface = Self::read(bytes)?;
+        interface.require_no_start_section()?;
+        let unknown_imports = interface.unknown_imports();
+        if !unknown_imports.is_empty() {
+            bail!(
+                "The plugin imports functions no Ito host provides: {}",
+                unknown_imports.join(", ")
+            );
+        }
+        interface.require_abi(expected_abi)?;
+        Ok(interface)
     }
 
     /// The kinds the plugin serves, in `KINDS` order: from `ito_supported_kinds`, which ABI 2
@@ -169,6 +237,35 @@ impl WasmInterface {
             .collect();
         names.into_iter().collect()
     }
+}
+
+/// Fails unless the function at `index` is `() -> i32`, the type hosts call `export` through.
+fn require_nullary_i32(
+    export: &str,
+    index: u32,
+    function_types: &[u32],
+    types: &[Option<FuncType>],
+) -> Result<()> {
+    let signature = function_types
+        .get(index as usize)
+        .and_then(|ty| types.get(*ty as usize))
+        .and_then(Option::as_ref)
+        .with_context(|| format!("{export} refers to a function with no known type"))?;
+    if signature.params().is_empty() && signature.results() == [ValType::I32] {
+        return Ok(());
+    }
+    let list = |types: &[ValType]| {
+        types
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    bail!(
+        "{export} must be a function () -> i32, but it is ({}) -> ({})",
+        list(signature.params()),
+        list(signature.results())
+    )
 }
 
 /// The value of a function whose body is a single `i32.const`, as the SDK's `ito_abi_version` and
@@ -290,6 +387,133 @@ mod tests {
             "#,
         );
         assert!(computed.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_start_section_is_detected_and_refused() -> Result<()> {
+        let started = module(r#"(func $init) (start $init)"#)?;
+        assert!(started.has_start_section);
+        assert!(started.require_no_start_section().is_err());
+
+        let plain = module(r#"(func $init) (func (export "get_home") (result i64) i64.const 0)"#)?;
+        assert!(!plain.has_start_section);
+        assert!(plain.require_no_start_section().is_ok());
+        Ok(())
+    }
+
+    const ABI_3: &str = r#"
+        (import "ito:core/net" "fetch_v2" (func (param i32 i32 i32 i32) (result i32)))
+        (func (export "ito_abi_version") (result i32) i32.const 3)
+        (func (export "ito_supported_kinds") (result i32) i32.const 1)
+    "#;
+
+    fn wasm(body: &str) -> Result<Vec<u8>> {
+        Ok(wat::parse_str(format!("(module {body})"))?)
+    }
+
+    #[test]
+    fn inspection_accepts_a_conforming_module_with_or_without_an_expectation() -> Result<()> {
+        let bytes = wasm(ABI_3)?;
+        assert_eq!(WasmInterface::inspect(&bytes, None)?.abi(), 3);
+        assert_eq!(WasmInterface::inspect(&bytes, Some(3))?.abi(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_another_abi_than_expected() -> Result<()> {
+        let error = WasmInterface::inspect(&wasm(ABI_3)?, Some(2))
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("The plugin is built for ABI 3, but ABI 2 is expected")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_a_start_section() -> Result<()> {
+        let bytes = wasm(&format!("{ABI_3} (func $init) (start $init)"))?;
+        assert!(WasmInterface::inspect(&bytes, None).is_err());
+        assert!(WasmInterface::inspect(&bytes, Some(3)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_an_abi_export_that_takes_a_parameter() -> Result<()> {
+        let bytes = wasm(
+            r#"
+            (func (export "ito_abi_version") (param i32) (result i32) i32.const 3)
+            (func (export "ito_supported_kinds") (result i32) i32.const 1)
+            "#,
+        )?;
+        let error = WasmInterface::inspect(&bytes, None)
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("ito_abi_version must be a function () -> i32, but it is (i32) -> (i32)")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_a_kinds_export_that_returns_i64() -> Result<()> {
+        let bytes = wasm(
+            r#"
+            (func (export "ito_abi_version") (result i32) i32.const 3)
+            (func (export "ito_supported_kinds") (result i64) i64.const 1)
+            "#,
+        )?;
+        let error = WasmInterface::inspect(&bytes, None)
+            .err()
+            .map(|e| e.to_string());
+        assert_eq!(
+            error.as_deref(),
+            Some("ito_supported_kinds must be a function () -> i32, but it is () -> (i64)")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_an_export_with_extra_results() -> Result<()> {
+        let bytes = wasm(
+            r#"
+            (func (export "ito_abi_version") (result i32 i32) i32.const 3 i32.const 0)
+            "#,
+        )?;
+        assert!(WasmInterface::inspect(&bytes, None).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn inspection_refuses_imports_no_host_provides() -> Result<()> {
+        let bytes = wasm(&format!(
+            r#"(import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32))) {ABI_3}"#
+        ))?;
+        let error = WasmInterface::inspect(&bytes, None)
+            .err()
+            .map(|e| e.to_string());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|message| message.contains("wasi_snapshot_preview1.fd_write"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_expected_abi_must_match_when_given() -> Result<()> {
+        let abi_3 = module(r#"(func (export "ito_abi_version") (result i32) i32.const 3)"#)?;
+        assert!(abi_3.require_abi(None).is_ok());
+        assert!(abi_3.require_abi(Some(3)).is_ok());
+        assert!(abi_3.require_abi(Some(2)).is_err());
+
+        // A module without the export is ABI 1 and is held to the expectation like any other.
+        let unversioned = module(r#"(func (export "get_home") (result i64) i64.const 0)"#)?;
+        assert!(unversioned.require_abi(Some(1)).is_ok());
+        assert!(unversioned.require_abi(Some(3)).is_err());
         Ok(())
     }
 }
