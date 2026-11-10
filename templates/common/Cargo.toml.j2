@@ -7,4 +7,5 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-ito-rs = { git = "https://github.com/kunihir0/ito-rs.git" }
+# The ABI 3 SDK, pinned to a commit so builds are reproducible. Commit Cargo.lock as well.
+ito-rs = { git = "https://github.com/AtiinLabs/ito-rs", rev = "213ccaa26b7d7c3bc68f5399ba12ef8414f187a9" }
