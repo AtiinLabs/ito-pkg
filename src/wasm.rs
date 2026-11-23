@@ -10,7 +10,7 @@ use wasmparser::{
 /// The host functions an Ito host provides, by module. Keep in step with ito-runner's import
 /// table (`WasmBridge.buildImportTable`): a plugin importing anything else can't load.
 pub const HOST_IMPORTS: &[(&str, &[&str])] = &[
-    ("ito:core/net", &["fetch", "fetch_v2", "fetch_read"]),
+    ("ito:core/net", &["fetch", "fetch_v2", "fetch_batch", "fetch_read"]),
     (
         "ito:core/html",
         &[
@@ -298,6 +298,7 @@ mod tests {
             (import "ito:core/net" "fetch_v2" (func (param i32 i32 i32 i32) (result i32)))
             (import "ito:core/html" "parse" (func (param i32 i32) (result i32)))
             (import "ito:core/net" "fetch_read" (func (param i32)))
+            (import "ito:core/net" "fetch_batch" (func (param i32 i32) (result i32)))
             (func (export "ito_abi_version") (result i32) i32.const 3)
             "#,
         )?;
@@ -307,6 +308,7 @@ mod tests {
             interface.import_names(),
             vec![
                 "ito:core/html.parse",
+                "ito:core/net.fetch_batch",
                 "ito:core/net.fetch_read",
                 "ito:core/net.fetch_v2"
             ]
